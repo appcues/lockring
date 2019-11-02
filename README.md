@@ -1,11 +1,17 @@
 # Lockring
 
-**TODO: Add description**
+Lockring is a mutex library for BEAM languages.
 
-## Installation
+Use it when you need exclusive access to a single resource or
+one of a pool of resources.
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `lockring` to your list of dependencies in `mix.exs`:
+These resources can be static data or GenServers. In the latter case,
+GenServer crashes are handled automatically, replacing the crashed server
+and releasing its lock.
+
+Lockring uses ETS tables and Erlang `:atomics` to coordinate locking,
+providing high scalability without the bottleneck and message-passing
+overhead of a GenServer-based system.## Installation
 
 ```elixir
 def deps do
@@ -14,8 +20,4 @@ def deps do
   ]
 end
 ```
-
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at [https://hexdocs.pm/lockring](https://hexdocs.pm/lockring).
 
