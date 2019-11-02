@@ -11,7 +11,9 @@ and releasing its lock.
 
 Lockring uses ETS tables and Erlang `:atomics` to coordinate locking,
 providing high scalability without the bottleneck and message-passing
-overhead of a GenServer-based system.## Installation
+overhead of a GenServer-based system.
+
+## Installation
 
 ```elixir
 def deps do
