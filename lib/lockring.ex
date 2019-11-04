@@ -302,12 +302,15 @@ defmodule Lockring do
   ## Data helpers
 
   defp get_resource(name, index) do
-    lookup({name, :resource, index})
+    case lookup({name, :resource, index}) do
+      {:resource, r} -> r
+      _ -> get_resource(name, index)
+    end
   end
 
   @doc false
   def put_resource(name, index, resource) do
-    insert!({name, :resource, index}, resource)
+    insert!({name, :resource, index}, {:resource, resource})
   end
 
   defp index(name) do
