@@ -69,15 +69,15 @@ defmodule Lockring do
 
     Logger.debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
 
-    insert_new({name, :size}, size)
-    insert_new({name, :opts}, opts)
+    insert_new!({name, :size}, size)
+    insert_new!({name, :opts}, opts)
 
     locks = :atomics.new(size, [])
-    insert_new({name, :locks}, locks)
+    insert_new!({name, :locks}, locks)
 
     index = :atomics.new(1, [])
     :atomics.put(index, 1, -1)
-    insert_new({name, :index}, index)
+    insert_new!({name, :index}, index)
 
     for index <- 1..size do
       launch_resource(name, index, opts)
@@ -278,11 +278,25 @@ defmodule Lockring do
   end
 
   defp insert(key, value) do
-    true = :ets.insert(@table, {key, value})
+    :ets.insert(@table, {key, value})
+  end
+
+  defp insert!(key, value) do
+    case insert(key, value) do
+      true -> true
+      false -> raise "insert! couldn't (key: #{inspect(key)}"
+    end
   end
 
   defp insert_new(key, value) do
-    true = :ets.insert_new(@table, {key, value})
+    :ets.insert_new(@table, {key, value})
+  end
+
+  defp insert_new!(key, value) do
+    case insert_new(key, value) do
+      true -> true
+      false -> raise "insert_new! couldn't (key: #{inspect(key)}"
+    end
   end
 
   ## Data helpers
@@ -293,7 +307,7 @@ defmodule Lockring do
 
   @doc false
   def put_resource(name, index, resource) do
-    insert({name, :resource, index}, resource)
+    insert!({name, :resource, index}, resource)
   end
 
   defp index(name) do
