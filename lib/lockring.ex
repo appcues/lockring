@@ -14,7 +14,7 @@ defmodule Lockring do
   overhead of a GenServer-based system.
   """
 
-  require Logger
+  use Lockring.Debug
 
   @type name :: any
   @type index :: non_neg_integer
@@ -67,7 +67,7 @@ defmodule Lockring do
   def new(name, opts \\ []) do
     size = :size |> config(opts)
 
-    Logger.debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
+    debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
 
     insert_new!({name, :size}, size)
     insert_new!({name, :opts}, opts)
@@ -116,6 +116,7 @@ defmodule Lockring do
         case :atomics.add_get(locks, index, 1) do
           1 ->
             lock_ref = {name, index}
+            debug("Locked #{inspect(lock_ref)}")
             resource = get_resource(name, index)
             {:ok, lock_ref, resource}
 
@@ -138,6 +139,7 @@ defmodule Lockring do
   @spec release(lock_ref) :: :ok
   def release(lock_ref) do
     {name, index} = lock_ref
+    debug("Released #{inspect(lock_ref)}")
     locks(name) |> :atomics.put(index, 0)
     :ok
   end
