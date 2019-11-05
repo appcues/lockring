@@ -23,7 +23,7 @@ defmodule Lockring do
 
   @table Application.get_env(:lockring, :ets_table, Lockring.Table)
 
-  @delay Application.get_env(:lockring, :spin_delay)
+  @delay Application.get_env(:lockring, :spin_delay, 10)
 
   @defaults [
     size: Application.get_env(:lockring, :size, 1),
@@ -35,11 +35,12 @@ defmodule Lockring do
 
   ## ETS data layout:
   ##
+  ## {name, :size} :: non_neg_integer -- this is the first thing created
   ## {name, :opts} :: Keyword.t
-  ## {name, :size} :: non_neg_integer
   ## {name, :locks} :: :atomics(size)
   ## {name, :index} :: :atomics(1)
   ## {name, :resource, index} :: any
+  ## {name, :created} :: true -- this is the last thing created
 
   @doc ~S"""
   Creates a new Lockring pool.
@@ -67,20 +68,24 @@ defmodule Lockring do
   def new(name, opts \\ []) do
     size = :size |> config(opts)
 
-    debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
 
-    insert_new!({name, :size}, size)
-    insert_new!({name, :opts}, opts)
+    if insert_new({name, :size}, size) do
+      debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
 
-    locks = :atomics.new(size, [])
-    insert_new!({name, :locks}, locks)
+      insert_new!({name, :opts}, opts)
 
-    index = :atomics.new(1, [])
-    :atomics.put(index, 1, -1)
-    insert_new!({name, :index}, index)
+      locks = :atomics.new(size, [])
+      insert_new!({name, :locks}, locks)
 
-    for index <- 1..size do
-      launch_resource(name, index, opts)
+      index = :atomics.new(1, [])
+      :atomics.put(index, 1, -1)
+      insert_new!({name, :index}, index)
+
+      for index <- 1..size do
+        launch_resource(name, index, opts)
+      end
+
+      insert_new!({name, :created}, true)
     end
 
     :ok
