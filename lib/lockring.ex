@@ -21,8 +21,6 @@ defmodule Lockring do
   @type lock_ref :: {name, index}
   @type resource :: any
 
-  @table Application.get_env(:lockring, :ets_table, Lockring.Table)
-
   @delay Application.get_env(:lockring, :spin_delay)
 
   @defaults [
@@ -32,6 +30,22 @@ defmodule Lockring do
     fun_timeout: :infinity,
     resource: :none
   ]
+
+
+  @doc false
+  def init(_opts) do
+    pool_count = :atomics.new(1, [])
+    :persistent_term.put(Lockring.PoolCount, pool_count)
+
+    new_lock = :atomics.new(1, [])
+    :persistent_term.put(Lockring.NewLock, new_lock)
+
+    for i <- 1..System.schedulers_online() do
+      table = :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
+      :persistent_term.put({Lockring.Shard, i}, table)
+    end
+  end
+
 
   ## ETS data layout:
   ##
@@ -65,25 +79,77 @@ defmodule Lockring do
   """
   @spec new(name, Keyword.t()) :: :ok
   def new(name, opts \\ []) do
-    size = :size |> config(opts)
+    #IO.inspect({:new, name})
+    new_lock = :persistent_term.get(Lockring.NewLock)
 
-    debug("Creating Lockring pool #{inspect(name)} of size #{size}.")
+    case :atomics.add_get(new_lock, 1, 1) do
+      1 ->
+        try do
+          if nil == :persistent_term.get({Lockring.Table, name}, nil) do
+            table = :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
+            size = config(:size, opts)
+            locks = :atomics.new(size, [])
+            index = :atomics.new(1, [])
+            :atomics.put(index, 1, -1)
 
-    insert_new!({name, :size}, size)
-    insert_new!({name, :opts}, opts)
+            :persistent_term.put({Lockring.Table, name}, table)
+            :persistent_term.put({Lockring.Size, name}, size)
+            :persistent_term.put({Lockring.Opts, name}, opts)
+            :persistent_term.put({Lockring.Locks, name}, locks)
+            :persistent_term.put({Lockring.Index, name}, index)
 
-    locks = :atomics.new(size, [])
-    insert_new!({name, :locks}, locks)
+            Enum.each(1..size, &launch_resource(table, name, &1, opts))
+          end
+        after
+          :atomics.sub(new_lock, 1, 1)
+        end
 
-    index = :atomics.new(1, [])
-    :atomics.put(index, 1, -1)
-    insert_new!({name, :index}, index)
-
-    for index <- 1..size do
-      launch_resource(name, index, opts)
+      n ->
+        if n > 1, do: :atomics.sub(new_lock, 1, 1)
+        new(name, opts)
     end
 
     :ok
+  end
+
+  @doc false
+  def get_resource(name, index) do
+    table = :persistent_term.get({Lockring.Table, name})
+    get_resource_from_table(table, index)
+  end
+
+  defp get_resource_from_table(table, index) do
+    case :ets.lookup(table, index) do
+      [{_, {:resource, r}}] -> r
+      [] -> get_resource_from_table(table, index)
+    end
+  end
+
+  @doc false
+  def put_resource(name, index, resource) do
+    table = :persistent_term.get({Lockring.Table, name})
+    put_resource_in_table(table, index, resource)
+  end
+
+  defp put_resource_in_table(table, index, resource) do
+    true = :ets.insert(table, {index, {:resource, resource}})
+    :ok
+  end
+
+  defp next_index(name) do
+    i =
+      :persistent_term.get({Lockring.Index, name})
+      |> :atomics.add_get(1, 1)
+    rem(i, size(name)) + 1
+  end
+
+  defp size(name) do
+    :persistent_term.get({Lockring.Size, name})
+  end
+
+  @doc false
+  def locks(name) do
+    :persistent_term.get({Lockring.Locks, name}, nil)
   end
 
   @doc ~S"""
@@ -120,15 +186,9 @@ defmodule Lockring do
             resource = get_resource(name, index)
             {:ok, lock_ref, resource}
 
-          n when n > 1 ->
-            :atomics.sub(locks, index, 1)
+          n ->
+            if n > 1, do: :atomics.sub(locks, index, 1)
             :fail
-
-          n when n < 1 ->
-            ## Something got screwed up, retry.
-            ## Adding 1 is more effective than putting 0 because races
-            ## here will be resolved naturally by release().
-            lock(name, opts)
         end
     end
   end
@@ -270,68 +330,7 @@ defmodule Lockring do
     :erlang.monotonic_time(:millisecond)
   end
 
-  #### ETS helpers
 
-  defp lookup(key, default \\ nil) do
-    case :ets.lookup(@table, key) do
-      [{_key, value}] -> value
-      [] -> default
-    end
-  end
-
-  defp insert(key, value) do
-    :ets.insert(@table, {key, value})
-  end
-
-  defp insert!(key, value) do
-    case insert(key, value) do
-      true -> true
-      false -> raise "insert! couldn't (key: #{inspect(key)}"
-    end
-  end
-
-  defp insert_new(key, value) do
-    :ets.insert_new(@table, {key, value})
-  end
-
-  defp insert_new!(key, value) do
-    case insert_new(key, value) do
-      true -> true
-      false -> raise "insert_new! couldn't (key: #{inspect(key)}"
-    end
-  end
-
-  ## Data helpers
-
-  defp get_resource(name, index) do
-    case lookup({name, :resource, index}) do
-      {:resource, r} -> r
-      _ -> get_resource(name, index)
-    end
-  end
-
-  @doc false
-  def put_resource(name, index, resource) do
-    insert!({name, :resource, index}, {:resource, resource})
-  end
-
-  defp index(name) do
-    lookup({name, :index})
-  end
-
-  @doc false
-  def locks(name) do
-    lookup({name, :locks})
-  end
-
-  defp size(name) do
-    lookup({name, :size})
-  end
-
-  defp next_index(name) do
-    n = index(name) |> :atomics.add_get(1, 1)
-    rem(n, size(name)) + 1
-  end
 
   ## Other helpers
 
@@ -350,7 +349,7 @@ defmodule Lockring do
     end
   end
 
-  defp launch_resource(name, index, opts) do
+  defp launch_resource(table, name, index, opts) do
     case config(:resource, opts) do
       :none ->
         put_resource(name, index, :none)
@@ -364,6 +363,7 @@ defmodule Lockring do
         wrapper_opts = [
           module: module,
           opts: new_module_opts,
+          table: table,
           name: name,
           index: index
         ]

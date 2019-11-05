@@ -5,14 +5,8 @@ defmodule Lockring.Application do
 
   use Application
 
-  def start(_type, _args) do
-    :ets.new(Lockring.Table, [
-      :set,
-      :public,
-      :named_table,
-      {:write_concurrency, true},
-      {:read_concurrency, true}
-    ])
+  def start(_type, args) do
+    Lockring.init(args)
 
     children = [
       {DynamicSupervisor, strategy: :one_for_one, name: Lockring.DynamicSupervisor}
