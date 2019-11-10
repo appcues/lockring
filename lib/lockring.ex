@@ -21,7 +21,7 @@ defmodule Lockring do
   @type lock_ref :: {name, index}
   @type resource :: any
 
-  @delay Application.get_env(:lockring, :spin_delay)
+  @spin_delay Application.get_env(:lockring, :spin_delay, 10)
 
   @defaults [
     size: Application.get_env(:lockring, :size, 1),
@@ -31,7 +31,6 @@ defmodule Lockring do
     resource: :none
   ]
 
-
   @doc false
   def init(_opts) do
     pool_count = :atomics.new(1, [])
@@ -39,21 +38,7 @@ defmodule Lockring do
 
     new_lock = :atomics.new(1, [])
     :persistent_term.put(Lockring.NewLock, new_lock)
-
-    for i <- 1..System.schedulers_online() do
-      table = :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
-      :persistent_term.put({Lockring.Shard, i}, table)
-    end
   end
-
-
-  ## ETS data layout:
-  ##
-  ## {name, :opts} :: Keyword.t
-  ## {name, :size} :: non_neg_integer
-  ## {name, :locks} :: :atomics(size)
-  ## {name, :index} :: :atomics(1)
-  ## {name, :resource, index} :: any
 
   @doc ~S"""
   Creates a new Lockring pool.
@@ -79,26 +64,13 @@ defmodule Lockring do
   """
   @spec new(name, Keyword.t()) :: :ok
   def new(name, opts \\ []) do
-    #IO.inspect({:new, name})
     new_lock = :persistent_term.get(Lockring.NewLock)
 
     case :atomics.add_get(new_lock, 1, 1) do
       1 ->
         try do
-          if nil == :persistent_term.get({Lockring.Table, name}, nil) do
-            table = :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
-            size = config(:size, opts)
-            locks = :atomics.new(size, [])
-            index = :atomics.new(1, [])
-            :atomics.put(index, 1, -1)
-
-            :persistent_term.put({Lockring.Table, name}, table)
-            :persistent_term.put({Lockring.Size, name}, size)
-            :persistent_term.put({Lockring.Opts, name}, opts)
-            :persistent_term.put({Lockring.Locks, name}, locks)
-            :persistent_term.put({Lockring.Index, name}, index)
-
-            Enum.each(1..size, &launch_resource(table, name, &1, opts))
+          if !:persistent_term.get({Lockring.Table, name}, nil) do
+            :ok = GenServer.call(Lockring.Maker, {:new, name, opts})
           end
         after
           :atomics.sub(new_lock, 1, 1)
@@ -106,6 +78,7 @@ defmodule Lockring do
 
       n ->
         if n > 1, do: :atomics.sub(new_lock, 1, 1)
+        spin()
         new(name, opts)
     end
 
@@ -120,8 +93,12 @@ defmodule Lockring do
 
   defp get_resource_from_table(table, index) do
     case :ets.lookup(table, index) do
-      [{_, {:resource, r}}] -> r
-      [] -> get_resource_from_table(table, index)
+      [{_, {:resource, r}}] ->
+        r
+
+      [] ->
+        spin()
+        get_resource_from_table(table, index)
     end
   end
 
@@ -137,10 +114,22 @@ defmodule Lockring do
   end
 
   defp next_index(name) do
-    i =
-      :persistent_term.get({Lockring.Index, name})
-      |> :atomics.add_get(1, 1)
-    rem(i, size(name)) + 1
+    case :persistent_term.get({Lockring.Index, name}, nil) do
+      nil ->
+        spin()
+        next_index(name)
+
+      index ->
+        i = :atomics.add_get(index, 1, 1)
+        rem(i, size(name)) + 1
+    end
+  end
+
+  defp spin do
+    if @spin_delay do
+      delay = round((1 + :random.uniform()) * @spin_delay)
+      Process.sleep(delay)
+    end
   end
 
   defp size(name) do
@@ -174,6 +163,7 @@ defmodule Lockring do
     case locks(name) do
       nil ->
         new(name, opts)
+        spin()
         lock(name, opts)
 
       locks ->
@@ -222,6 +212,21 @@ defmodule Lockring do
       end
 
     wait_for_lock_until(name, wait_until, opts)
+  end
+
+  defp wait_for_lock_until(name, until, opts) do
+    case Lockring.lock(name, opts) do
+      {:ok, _lock_ref, _resource} = success ->
+        success
+
+      :fail ->
+        if until == :infinity || now() < until do
+          spin()
+          wait_for_lock_until(name, until, opts)
+        else
+          {:error, "wait_timeout reached"}
+        end
+    end
   end
 
   @doc ~S"""
@@ -329,55 +334,6 @@ defmodule Lockring do
   def now do
     :erlang.monotonic_time(:millisecond)
   end
-
-
-
-  ## Other helpers
-
-  defp wait_for_lock_until(name, until, opts) do
-    case Lockring.lock(name, opts) do
-      {:ok, _lock_ref, _resource} = success ->
-        success
-
-      :fail ->
-        if until == :infinity || now() < until do
-          if nil != @delay, do: Process.sleep(@delay)
-          wait_for_lock_until(name, until, opts)
-        else
-          {:error, "wait_timeout reached"}
-        end
-    end
-  end
-
-  defp launch_resource(table, name, index, opts) do
-    case config(:resource, opts) do
-      :none ->
-        put_resource(name, index, :none)
-
-      fun when is_function(fun) ->
-        put_resource(name, index, fun.(name, index))
-
-      {module, module_opts} ->
-        new_module_opts = [{:name, name}, {:index, index} | module_opts]
-
-        wrapper_opts = [
-          module: module,
-          opts: new_module_opts,
-          table: table,
-          name: name,
-          index: index
-        ]
-
-        DynamicSupervisor.start_child(Lockring.DynamicSupervisor, %{
-          id: {Lockring.DynamicSupervisor, name, index},
-          start: {Lockring.GenServerWrapper, :start_link, [wrapper_opts]},
-          restart: :permanent,
-          type: :worker,
-          shutdown: :brutal_kill
-        })
-
-      other ->
-        raise ArgumentError, "unknown value for :resource -- #{inspect(other)}"
-    end
-  end
 end
+
+## Other helpers
