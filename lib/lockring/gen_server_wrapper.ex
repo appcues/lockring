@@ -16,12 +16,13 @@ defmodule Lockring.GenServerWrapper do
 
     locks = Lockring.locks(name)
 
-    :atomics.put(locks, index, 999)
+    :atomics.put(locks, index, -999)
 
     {:ok, pid} = GenServer.start_link(module, opts)
     Lockring.put_resource(name, index, pid)
 
-    :atomics.put(locks, index, 0)
+    semaphore = :persistent_term.get({Lockring.Semaphore, name})
+    :atomics.put(locks, index, semaphore)
 
     {:ok, opts}
   end

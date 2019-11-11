@@ -28,7 +28,8 @@ defmodule Lockring do
     timeout: 5000,
     wait_timeout: :infinity,
     fun_timeout: :infinity,
-    resource: :none
+    resource: :none,
+    semaphore: 1,
   ]
 
   @doc false
@@ -169,15 +170,15 @@ defmodule Lockring do
       locks ->
         index = next_index(name)
 
-        case :atomics.add_get(locks, index, 1) do
-          1 ->
+        case :atomics.sub_get(locks, index, 1) do
+          n when n >= 0 ->
             lock_ref = {name, index}
             debug("Locked #{inspect(lock_ref)}")
             resource = get_resource(name, index)
             {:ok, lock_ref, resource}
 
-          n ->
-            if n > 1, do: :atomics.sub(locks, index, 1)
+          _ ->
+            :atomics.add(locks, index, 1)
             :fail
         end
     end
@@ -190,7 +191,7 @@ defmodule Lockring do
   def release(lock_ref) do
     {name, index} = lock_ref
     debug("Released #{inspect(lock_ref)}")
-    locks(name) |> :atomics.put(index, 0)
+    locks(name) |> :atomics.add(index, 1)
     :ok
   end
 

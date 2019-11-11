@@ -19,12 +19,17 @@ defmodule Lockring.Maker do
         :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
 
       size = Lockring.config(:size, opts)
+      semaphore = Lockring.config(:semaphore, opts)
+
       locks = :atomics.new(size, [])
+      Enum.each(1..size, &:atomics.put(locks, &1, semaphore))
+
       index = :atomics.new(1, [])
       :atomics.put(index, 1, -1)
 
       :persistent_term.put({Lockring.Table, name}, table)
       :persistent_term.put({Lockring.Size, name}, size)
+      :persistent_term.put({Lockring.Semaphore, name}, semaphore)
       :persistent_term.put({Lockring.Opts, name}, opts)
       :persistent_term.put({Lockring.Locks, name}, locks)
       :persistent_term.put({Lockring.Index, name}, index)
