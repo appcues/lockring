@@ -104,20 +104,6 @@ defmodule LockringTest do
     assert {:ok, _lock_ref, _resource} = Lockring.lock(name)
   end
 
-  @lol """
-  test "recovers from underflow" do
-    name = self()
-    Lockring.new(name, size: 1, resource: {LockringTest.Resource, []})
-    Lockring.locks(name) |> :atomics.put(1, -5)
-
-    assert {:ok, lock_ref, _resource} = Lockring.wait_for_lock(name)
-    assert :fail = Lockring.lock(name)
-
-    assert :ok = Lockring.release(lock_ref)
-    assert {:ok, _lock_ref, _resource} = Lockring.lock(name)
-  end
-  """
-
   test "bad resource" do
     name = self()
 
@@ -129,5 +115,50 @@ defmodule LockringTest do
       end
 
     assert :crash = output
+  end
+
+  test "semaphore" do
+    name = self()
+
+    assert :ok = Lockring.new(name, semaphore: 3)
+
+    assert {:ok, lock_ref1, _resource} = Lockring.lock(name)
+    assert {:ok, lock_ref2, _resource} = Lockring.lock(name)
+    assert {:ok, lock_ref3, _resource} = Lockring.lock(name)
+    assert :fail = Lockring.lock(name)
+
+    assert :ok = Lockring.release(lock_ref1)
+    assert {:ok, _lock_ref, _resource} = Lockring.lock(name)
+    assert :fail = Lockring.lock(name)
+
+    assert :ok = Lockring.release(lock_ref2)
+    assert :ok = Lockring.release(lock_ref3)
+    assert {:ok, _lock_ref4, _resource} = Lockring.lock(name)
+    assert {:ok, _lock_ref4, _resource} = Lockring.lock(name)
+    assert :fail = Lockring.lock(name)
+  end
+
+  test "semaphore resets on resource crash" do
+    name = self()
+    Lockring.new(name, size: 1, semaphore: 3, resource: {LockringTest.Resource, []})
+
+    assert {:ok, lock_ref, pid1} = Lockring.lock(name)
+    assert {:ok, _lock_ref, pid2} = Lockring.lock(name)
+    assert {:ok, _lock_ref, pid3} = Lockring.lock(name)
+    assert pid1 == pid2
+    assert pid1 == pid3
+    assert :fail = Lockring.lock(name)
+
+    GenServer.cast(pid1, :crash)
+    Process.sleep(50)
+
+    assert {:ok, _lock_ref, pid} = Lockring.lock(name)
+    assert {:ok, _lock_ref, ^pid} = Lockring.lock(name)
+    assert {:ok, _lock_ref, ^pid} = Lockring.lock(name)
+    assert :fail = Lockring.lock(name)
+
+    ## ensure that releasing a lock on a stale resource does nothing
+    assert :ok = Lockring.release(lock_ref)
+    assert :fail = Lockring.lock(name)
   end
 end

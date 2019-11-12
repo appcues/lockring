@@ -1,17 +1,17 @@
 defmodule Lockring do
   @moduledoc ~S"""
-  Lockring is a mutex library for BEAM languages.
+  Lockring is a mutex and semaphore library for BEAM languages.
 
-  Use it when you need exclusive access to a single resource or
+  Use it when you need exclusive or moderated access to a single resource or
   one of a pool of resources.
 
   These resources can be static data or GenServers. In the latter case,
   GenServer crashes are handled automatically, replacing the crashed server
   and releasing its lock.
 
-  Lockring uses ETS tables and Erlang `:atomics` to coordinate locking,
-  providing high scalability without the bottleneck and message-passing
-  overhead of a GenServer-based system.
+  Lockring uses Erlang's `:persistent_term`, `:atomics`, and ETS tables
+  to coordinate locking, providing high scalability without the bottleneck
+  and message-passing overhead of a GenServer-based system.
   """
 
   use Lockring.Debug
@@ -21,10 +21,9 @@ defmodule Lockring do
   @type lock_ref :: {name, index}
   @type resource :: any
 
-  @spin_delay Application.get_env(:lockring, :spin_delay, 10)
-
   @defaults [
-    size: Application.get_env(:lockring, :size, 1),
+    spin_delay: 5,
+    size: 1,
     timeout: 5000,
     wait_timeout: :infinity,
     fun_timeout: :infinity,
@@ -47,6 +46,9 @@ defmodule Lockring do
   Options:
 
   * `:size` - The number of resources in this pool. Default 1.
+
+  * `:semaphore` - The number of simultaneous locks to permit on a single
+    resource. Default 1 (i.e., a mutex).
 
   * `:resource` - Function or `{module, opts}` tuple for generating
     resources.
@@ -79,7 +81,7 @@ defmodule Lockring do
 
       n ->
         if n > 1, do: :atomics.sub(new_lock, 1, 1)
-        spin()
+        spin(opts)
         new(name, opts)
     end
 
@@ -87,19 +89,19 @@ defmodule Lockring do
   end
 
   @doc false
-  def get_resource(name, index) do
+  def get_resource(name, index, opts \\ []) do
     table = :persistent_term.get({Lockring.Table, name})
-    get_resource_from_table(table, index)
+    get_resource_from_table(table, index, opts)
   end
 
-  defp get_resource_from_table(table, index) do
+  defp get_resource_from_table(table, index, opts) do
     case :ets.lookup(table, index) do
       [{_, {:resource, r}}] ->
         r
 
       [] ->
-        spin()
-        get_resource_from_table(table, index)
+        spin(opts)
+        get_resource_from_table(table, index, opts)
     end
   end
 
@@ -126,10 +128,14 @@ defmodule Lockring do
     end
   end
 
-  defp spin do
-    if @spin_delay do
-      delay = round((1 + :random.uniform()) * @spin_delay)
-      Process.sleep(delay)
+  defp spin(opts \\ []) do
+    case config(:spin_delay, opts) do
+      nil ->
+        :ok
+
+      spin_delay ->
+        delay = round((1 + :random.uniform()) * spin_delay)
+        Process.sleep(delay)
     end
   end
 
@@ -174,11 +180,12 @@ defmodule Lockring do
           n when n >= 0 ->
             lock_ref = {name, index}
             debug("Locked #{inspect(lock_ref)}")
-            resource = get_resource(name, index)
+            resource = get_resource(name, index, opts)
             {:ok, lock_ref, resource}
 
           _ ->
-            :atomics.add(locks, index, 1)
+            #:atomics.add(locks, index, 1)
+            :atomics.put(locks, index, 0)
             :fail
         end
     end
@@ -222,7 +229,7 @@ defmodule Lockring do
 
       :fail ->
         if until == :infinity || now() < until do
-          spin()
+          spin(opts)
           wait_for_lock_until(name, until, opts)
         else
           {:error, "wait_timeout reached"}
