@@ -88,84 +88,6 @@ defmodule Lockring do
     :ok
   end
 
-  @doc false
-  def get_resource(name, index, opts \\ []) do
-    table = :persistent_term.get({Lockring.Table, name})
-    get_resource_from_table(table, index, opts)
-  end
-
-  defp get_resource_from_table(table, index, opts) do
-    case :ets.lookup(table, {:resource, index}) do
-      [{_, r}] ->
-        r
-
-      [] ->
-        spin(opts)
-        get_resource_from_table(table, index, opts)
-    end
-  end
-
-  @doc false
-  def put_resource(name, index, resource) do
-    table = :persistent_term.get({Lockring.Table, name})
-    put_resource_in_table(table, index, resource)
-  end
-
-  defp put_resource_in_table(table, index, resource) do
-    resource_ref = make_ref()
-    true = :ets.insert(table, {{:resource, index}, resource})
-    true = :ets.insert(table, {{:resource_ref, index}, resource_ref})
-    :ok
-  end
-
-  defp get_resource_ref(name, index, opts \\ []) do
-    table = :persistent_term.get({Lockring.Table, name})
-    get_resource_ref_from_table(table, index, opts)
-  end
-
-  defp get_resource_ref_from_table(table, index, opts) do
-    case :ets.lookup(table, {:resource_ref, index}) do
-      [{_, ref}] ->
-        ref
-
-      [] ->
-        spin(opts)
-        get_resource_from_table(table, index, opts)
-    end
-  end
-
-  defp next_index(name) do
-    case :persistent_term.get({Lockring.Index, name}, nil) do
-      nil ->
-        spin()
-        next_index(name)
-
-      index ->
-        i = :atomics.add_get(index, 1, 1)
-        rem(i, size(name)) + 1
-    end
-  end
-
-  defp spin(opts \\ []) do
-    case config(:spin_delay, opts) do
-      nil ->
-        :ok
-
-      spin_delay ->
-        delay = round((1 + :random.uniform()) * spin_delay)
-        Process.sleep(delay)
-    end
-  end
-
-  defp size(name) do
-    :persistent_term.get({Lockring.Size, name})
-  end
-
-  @doc false
-  def locks(name) do
-    :persistent_term.get({Lockring.Locks, name}, nil)
-  end
-
   @doc ~S"""
   Attempts one time to acquire a lock on a resource in a pool.
 
@@ -358,7 +280,7 @@ defmodule Lockring do
     end
   end
 
-  #### Private stuff below here
+  #### Public API ends here
 
   @doc false
   def config(key, opts) do
@@ -369,6 +291,82 @@ defmodule Lockring do
   def now do
     :erlang.monotonic_time(:millisecond)
   end
-end
 
-## Other helpers
+  @doc false
+  def get_resource(name, index, opts \\ []) do
+    table = :persistent_term.get({Lockring.Table, name})
+    get_resource_from_table(table, index, opts)
+  end
+
+  defp get_resource_from_table(table, index, opts) do
+    case :ets.lookup(table, {:resource, index}) do
+      [{_, r}] ->
+        r
+
+      [] ->
+        spin(opts)
+        get_resource_from_table(table, index, opts)
+    end
+  end
+
+  @doc false
+  def put_resource(name, index, resource) do
+    table = :persistent_term.get({Lockring.Table, name})
+    put_resource_in_table(table, index, resource)
+  end
+
+  defp put_resource_in_table(table, index, resource) do
+    resource_ref = make_ref()
+    true = :ets.insert(table, {{:resource, index}, resource})
+    true = :ets.insert(table, {{:resource_ref, index}, resource_ref})
+    :ok
+  end
+
+  defp get_resource_ref(name, index, opts \\ []) do
+    table = :persistent_term.get({Lockring.Table, name})
+    get_resource_ref_from_table(table, index, opts)
+  end
+
+  defp get_resource_ref_from_table(table, index, opts) do
+    case :ets.lookup(table, {:resource_ref, index}) do
+      [{_, ref}] ->
+        ref
+
+      [] ->
+        spin(opts)
+        get_resource_from_table(table, index, opts)
+    end
+  end
+
+  defp next_index(name) do
+    case :persistent_term.get({Lockring.Index, name}, nil) do
+      nil ->
+        spin()
+        next_index(name)
+
+      index ->
+        i = :atomics.add_get(index, 1, 1)
+        rem(i, size(name)) + 1
+    end
+  end
+
+  defp spin(opts \\ []) do
+    case config(:spin_delay, opts) do
+      nil ->
+        :ok
+
+      spin_delay ->
+        delay = round((1 + :random.uniform()) * spin_delay)
+        Process.sleep(delay)
+    end
+  end
+
+  defp size(name) do
+    :persistent_term.get({Lockring.Size, name})
+  end
+
+  @doc false
+  def locks(name) do
+    :persistent_term.get({Lockring.Locks, name}, nil)
+  end
+end
