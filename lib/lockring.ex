@@ -18,7 +18,7 @@ defmodule Lockring do
 
   @type name :: any
   @type index :: non_neg_integer
-  @type lock_ref :: {name, index}
+  @type lock_ref :: {name, index, reference}
   @type resource :: any
 
   @defaults [
@@ -28,7 +28,7 @@ defmodule Lockring do
     wait_timeout: :infinity,
     fun_timeout: :infinity,
     resource: :none,
-    semaphore: 1,
+    semaphore: 1
   ]
 
   @doc false
@@ -95,8 +95,8 @@ defmodule Lockring do
   end
 
   defp get_resource_from_table(table, index, opts) do
-    case :ets.lookup(table, index) do
-      [{_, {:resource, r}}] ->
+    case :ets.lookup(table, {:resource, index}) do
+      [{_, r}] ->
         r
 
       [] ->
@@ -112,8 +112,26 @@ defmodule Lockring do
   end
 
   defp put_resource_in_table(table, index, resource) do
-    true = :ets.insert(table, {index, {:resource, resource}})
+    resource_ref = make_ref()
+    true = :ets.insert(table, {{:resource, index}, resource})
+    true = :ets.insert(table, {{:resource_ref, index}, resource_ref})
     :ok
+  end
+
+  defp get_resource_ref(name, index, opts \\ []) do
+    table = :persistent_term.get({Lockring.Table, name})
+    get_resource_ref_from_table(table, index, opts)
+  end
+
+  defp get_resource_ref_from_table(table, index, opts) do
+    case :ets.lookup(table, {:resource_ref, index}) do
+      [{_, ref}] ->
+        ref
+
+      [] ->
+        spin(opts)
+        get_resource_from_table(table, index, opts)
+    end
   end
 
   defp next_index(name) do
@@ -178,13 +196,14 @@ defmodule Lockring do
 
         case :atomics.sub_get(locks, index, 1) do
           n when n >= 0 ->
-            lock_ref = {name, index}
-            debug("Locked #{inspect(lock_ref)}")
             resource = get_resource(name, index, opts)
+            resource_ref = get_resource_ref(name, index, opts)
+            lock_ref = {name, index, resource_ref}
+            debug("Locked #{inspect(lock_ref)}")
             {:ok, lock_ref, resource}
 
           _ ->
-            #:atomics.add(locks, index, 1)
+            # :atomics.add(locks, index, 1)
             :atomics.put(locks, index, 0)
             :fail
         end
@@ -196,9 +215,17 @@ defmodule Lockring do
   """
   @spec release(lock_ref) :: :ok
   def release(lock_ref) do
-    {name, index} = lock_ref
-    debug("Released #{inspect(lock_ref)}")
-    locks(name) |> :atomics.add(index, 1)
+    {name, index, resource_ref} = lock_ref
+
+    case get_resource_ref(name, index) do
+      ^resource_ref ->
+        debug("Released #{inspect(lock_ref)}")
+        locks(name) |> :atomics.add(index, 1)
+
+      _ ->
+        debug("Ignoring release on stale ref: #{inspect(lock_ref)}")
+    end
+
     :ok
   end
 
