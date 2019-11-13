@@ -21,23 +21,41 @@ defmodule Lockring do
   @type lock_ref :: {name, index, reference}
   @type resource :: any
 
+  @type general_opt ::
+          {:spin_delay, nil | non_neg_integer}
+
+  @type new_opt ::
+          {:size, pos_integer}
+          | {:semaphore, pos_integer}
+          | {:resource, resource_spec}
+
+  @type resource_spec :: :none | {module, any} | (name, index -> any)
+
+  @type timeout_opt ::
+          {:timeout, timeout}
+          | {:wait_timeout, timeout}
+          | {:fun_timeout, timeout}
+
   @defaults [
     spin_delay: 5,
     size: 1,
+    semaphore: 1,
+    resource: :none,
     timeout: 5000,
     wait_timeout: :infinity,
-    fun_timeout: :infinity,
-    resource: :none,
-    semaphore: 1
+    fun_timeout: :infinity
   ]
 
   @doc false
+  @spec init(Keyword.t()) :: :ok
   def init(_opts) do
     pool_count = :atomics.new(1, [])
     :persistent_term.put(Lockring.PoolCount, pool_count)
 
     new_lock = :atomics.new(1, [])
     :persistent_term.put(Lockring.NewLock, new_lock)
+
+    :ok
   end
 
   @doc ~S"""
@@ -65,7 +83,7 @@ defmodule Lockring do
     This is useful for creating locks that are not attached to a given
     resource.  This is the default behavior.
   """
-  @spec new(name, Keyword.t()) :: :ok
+  @spec new(name, [new_opt | general_opt]) :: :ok
   def new(name, opts \\ []) do
     new_lock = :persistent_term.get(Lockring.NewLock)
 
@@ -73,6 +91,7 @@ defmodule Lockring do
       1 ->
         try do
           if !:persistent_term.get({Lockring.Table, name}, nil) do
+            debug("creating #{inspect(name)}")
             :ok = GenServer.call(Lockring.Maker, {:new, name, opts})
           end
         after
@@ -105,7 +124,8 @@ defmodule Lockring do
 
   To lock a resource and execute a function on it, see `with_lock/3`.
   """
-  @spec lock(name, Keyword.t()) :: {:ok, lock_ref, resource} | :fail | {:error, String.t()}
+  @spec lock(name, [new_opt | general_opt]) ::
+          {:ok, lock_ref, resource} | :fail | {:error, String.t()}
   def lock(name, opts \\ []) do
     case locks(name) do
       nil ->
@@ -125,8 +145,7 @@ defmodule Lockring do
             {:ok, lock_ref, resource}
 
           _ ->
-            # :atomics.add(locks, index, 1)
-            :atomics.put(locks, index, 0)
+            :atomics.add(locks, index, 1)
             :fail
         end
     end
@@ -160,7 +179,8 @@ defmodule Lockring do
   `:fail` if the resource is already locked, or `{:error, reason}` if
   something went wrong.
   """
-  @spec wait_for_lock(name, timeout) :: {:ok, lock_ref, resource} | :fail | {:error, String.t()}
+  @spec wait_for_lock(name, timeout, [new_opt | general_opt]) ::
+          {:ok, lock_ref, resource} | :fail | {:error, String.t()}
   def wait_for_lock(name, timeout \\ :infinity, opts \\ []) do
     wait_until =
       case timeout do
@@ -207,13 +227,14 @@ defmodule Lockring do
     `fun.(resource)`. Default `:infinity`.
     execution to finish.
   """
-  @spec with_lock(name, (resource -> any), Keyword.t()) :: {:ok, any} | {:error, String.t()}
+  @spec with_lock(name, (resource -> any), [new_opt | timeout_opt | general_opt]) ::
+          {:ok, any} | {:error, String.t()}
   def with_lock(name, fun, opts \\ []) do
     timeout = :timeout |> config(opts)
     wait_timeout = :wait_timeout |> config(opts)
     fun_timeout = :fun_timeout |> config(opts)
 
-    actual_wait_timeout =
+    shortest_wait_timeout =
       case {timeout, wait_timeout} do
         {nil, _} -> wait_timeout
         {:infinity, _} -> wait_timeout
@@ -221,16 +242,16 @@ defmodule Lockring do
         {_, _} -> min(timeout, wait_timeout)
       end
 
-    actual_wait_timeout =
-      if actual_wait_timeout == :infinity do
+    non_neg_wait_timeout =
+      if shortest_wait_timeout == :infinity do
         :infinity
       else
-        max(0, actual_wait_timeout)
+        max(0, shortest_wait_timeout)
       end
 
     start_time = now()
 
-    case wait_for_lock(name, actual_wait_timeout, opts) do
+    case wait_for_lock(name, non_neg_wait_timeout, opts) do
       {:ok, lock_ref, resource} ->
         try do
           task =
@@ -244,7 +265,7 @@ defmodule Lockring do
 
           elapsed = now() - start_time
 
-          actual_fun_timeout =
+          shortest_fun_timeout =
             case {timeout, fun_timeout} do
               {nil, _} -> fun_timeout
               {:infinity, _} -> fun_timeout
@@ -252,14 +273,14 @@ defmodule Lockring do
               {_, _} -> min(timeout - elapsed, fun_timeout)
             end
 
-          actual_fun_timeout =
-            if actual_fun_timeout == :infinity do
+          non_neg_fun_timeout =
+            if shortest_fun_timeout == :infinity do
               :infinity
             else
-              max(0, actual_fun_timeout)
+              max(0, shortest_fun_timeout)
             end
 
-          case Task.yield(task, max(0, actual_fun_timeout)) do
+          case Task.yield(task, max(0, non_neg_fun_timeout)) do
             {:ok, {:task_error, e}} ->
               {:error, Exception.message(e)}
 
@@ -268,7 +289,6 @@ defmodule Lockring do
 
             nil ->
               Task.shutdown(task)
-              ## FIXME destroy resource here?
               {:error, "fun_timeout reached"}
           end
         after
@@ -288,11 +308,13 @@ defmodule Lockring do
   end
 
   @doc false
+  @spec now() :: integer
   def now do
     :erlang.monotonic_time(:millisecond)
   end
 
   @doc false
+  @spec get_resource(name, index, [general_opt]) :: :ok
   def get_resource(name, index, opts \\ []) do
     table = :persistent_term.get({Lockring.Table, name})
     get_resource_from_table(table, index, opts)
@@ -310,6 +332,7 @@ defmodule Lockring do
   end
 
   @doc false
+  @spec put_resource(name, index, resource) :: :ok
   def put_resource(name, index, resource) do
     table = :persistent_term.get({Lockring.Table, name})
     put_resource_in_table(table, index, resource)
@@ -366,6 +389,7 @@ defmodule Lockring do
   end
 
   @doc false
+  @spec locks(name) :: :atomics.atomics_ref() | nil
   def locks(name) do
     :persistent_term.get({Lockring.Locks, name}, nil)
   end

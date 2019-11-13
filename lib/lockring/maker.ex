@@ -16,7 +16,12 @@ defmodule Lockring.Maker do
   def handle_call({:new, name, opts}, _from, state) do
     try do
       table =
-        :ets.new(nil, [:set, :public, {:write_concurrency, true}, {:read_concurrency, true}])
+        :ets.new(nil, [
+          :set,
+          :public,
+          {:write_concurrency, true},
+          {:read_concurrency, true},
+        ])
 
       size = Lockring.config(:size, opts)
       semaphore = Lockring.config(:semaphore, opts)

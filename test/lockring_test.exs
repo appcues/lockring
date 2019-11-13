@@ -2,7 +2,9 @@ defmodule LockringTest.Resource do
   use GenServer
   def init(opts), do: {:ok, opts}
   def handle_call(:state, _from, state), do: {:reply, state, state}
-  def handle_cast(:crash, _state), do: raise("this crash is deliberate")
+
+  def handle_cast(:crash, _state),
+    do: raise("don't worry, this crash is deliberate")
 end
 
 defmodule LockringTest do
@@ -87,7 +89,9 @@ defmodule LockringTest do
     end)
 
     Process.sleep(50)
-    assert {:error, _} = Lockring.with_lock(name, fn _res -> :ok end, wait_timeout: 100)
+
+    assert {:error, _} =
+             Lockring.with_lock(name, fn _res -> :ok end, wait_timeout: 100)
   end
 
   test "with_lock fun_timeout" do
@@ -95,7 +99,9 @@ defmodule LockringTest do
     Lockring.new(name, size: 1, resource: {LockringTest.Resource, []})
 
     assert {:error, _} =
-             Lockring.with_lock(name, fn _res -> Process.sleep(500) end, fun_timeout: 100)
+             Lockring.with_lock(name, fn _res -> Process.sleep(500) end,
+               fun_timeout: 100
+             )
   end
 
   test "lock is released if with_lock fun crashes" do
@@ -140,7 +146,12 @@ defmodule LockringTest do
 
   test "semaphore resets on resource crash" do
     name = self()
-    Lockring.new(name, size: 1, semaphore: 3, resource: {LockringTest.Resource, []})
+
+    Lockring.new(name,
+      size: 1,
+      semaphore: 3,
+      resource: {LockringTest.Resource, []}
+    )
 
     assert {:ok, lock_ref, pid1} = Lockring.lock(name)
     assert {:ok, _lock_ref, pid2} = Lockring.lock(name)

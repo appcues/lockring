@@ -10,7 +10,8 @@ defmodule Lockring.Application do
 
     children = [
       {Lockring.Maker, []},
-      {DynamicSupervisor, strategy: :one_for_one, name: Lockring.DynamicSupervisor}
+      {DynamicSupervisor,
+       strategy: :one_for_one, name: Lockring.DynamicSupervisor},
     ]
 
     opts = [strategy: :one_for_one, name: Lockring.Supervisor]
