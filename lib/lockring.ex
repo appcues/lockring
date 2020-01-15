@@ -15,6 +15,7 @@ defmodule Lockring do
   """
 
   use Lockring.Debug
+  import Lockring.Config, only: [config: 2]
 
   @type name :: any
   @type index :: non_neg_integer
@@ -35,16 +36,6 @@ defmodule Lockring do
           {:timeout, timeout}
           | {:wait_timeout, timeout}
           | {:fun_timeout, timeout}
-
-  @defaults [
-    spin_delay: 5,
-    size: 1,
-    semaphore: 1,
-    resource: :none,
-    timeout: 5000,
-    wait_timeout: :infinity,
-    fun_timeout: :infinity
-  ]
 
   @doc false
   @spec init(Keyword.t()) :: :ok
@@ -127,6 +118,13 @@ defmodule Lockring do
   @spec lock(name, [new_opt | general_opt]) ::
           {:ok, lock_ref, resource} | :fail | {:error, String.t()}
   def lock(name, opts \\ []) do
+    case lock_with_index(name, opts) do
+      {:fail, _index} -> :fail
+      other -> other
+    end
+  end
+
+  defp lock_with_index(name, opts) do
     case locks(name) do
       nil ->
         new(name, opts)
@@ -146,7 +144,7 @@ defmodule Lockring do
 
           _ ->
             :atomics.add(locks, index, 1)
-            :fail
+            {:fail, index}
         end
     end
   end
@@ -160,8 +158,14 @@ defmodule Lockring do
 
     case get_resource_ref(name, index) do
       ^resource_ref ->
-        debug("Released #{inspect(lock_ref)}")
-        locks(name) |> :atomics.add(index, 1)
+        if wait_queue_flag(name, index) > 0 do
+          resource = get_resource(name, index)
+          wait_queue(name, index) |> Lockring.WaitQueue.next(lock_ref, resource)
+          debug("Passed #{inspect(lock_ref)} to waiting process")
+        else
+          :atomics.add(locks(name), index, 1)
+          debug("Released #{inspect(lock_ref)}")
+        end
 
       _ ->
         debug("Ignoring release on stale ref: #{inspect(lock_ref)}")
@@ -182,26 +186,28 @@ defmodule Lockring do
   @spec wait_for_lock(name, timeout, [new_opt | general_opt]) ::
           {:ok, lock_ref, resource} | :fail | {:error, String.t()}
   def wait_for_lock(name, timeout \\ :infinity, opts \\ []) do
-    wait_until =
-      case timeout do
-        :infinity -> :infinity
-        t -> now() + t
-      end
-
-    wait_for_lock_until(name, wait_until, opts)
-  end
-
-  defp wait_for_lock_until(name, until, opts) do
-    case Lockring.lock(name, opts) do
+    case lock_with_index(name, opts) do
       {:ok, _lock_ref, _resource} = success ->
         success
 
-      :fail ->
-        if until == :infinity || now() < until do
-          spin(opts)
-          wait_for_lock_until(name, until, opts)
-        else
-          {:error, "wait_timeout reached"}
+      {:fail, index} ->
+        timeout_at =
+          case timeout do
+            :infinity -> :infinity
+            t -> now() + t
+          end
+
+        case wait_queue(name, index) |> Lockring.WaitQueue.await(timeout_at) do
+          :fail ->
+            :fail
+
+          :ok ->
+            receive do
+              {Lockring.GoAhead, lock_ref, resource} ->
+                {:ok, lock_ref, resource}
+            after
+              timeout -> :fail
+            end
         end
     end
   end
@@ -252,6 +258,9 @@ defmodule Lockring do
     start_time = now()
 
     case wait_for_lock(name, non_neg_wait_timeout, opts) do
+      :fail ->
+        {:error, "wait_timeout reached"}
+
       {:ok, lock_ref, resource} ->
         try do
           task =
@@ -301,11 +310,6 @@ defmodule Lockring do
   end
 
   #### Public API ends here
-
-  @doc false
-  def config(key, opts) do
-    opts[key] || Application.get_env(:lockring, key, @defaults[key])
-  end
 
   @doc false
   @spec now() :: integer
@@ -371,6 +375,16 @@ defmodule Lockring do
         i = :atomics.add_get(index, 1, 1)
         rem(i, size(name)) + 1
     end
+  end
+
+  defp wait_queue(name, index) do
+    queues = :persistent_term.get({Lockring.WaitQueues, name}, nil)
+    queues[index]
+  end
+
+  defp wait_queue_flag(name, index) do
+    flags = :persistent_term.get({Lockring.WaitQueueFlags, name}, nil)
+    :atomics.get(flags, index)
   end
 
   defp spin(opts \\ []) do
