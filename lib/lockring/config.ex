@@ -9,7 +9,7 @@ defmodule Lockring.Config do
     resource: :none,
     timeout: 5000,
     wait_timeout: :infinity,
-    fun_timeout: :infinity
+    fun_timeout: :infinity,
   ]
 
   defp default(key), do: @defaults[key]

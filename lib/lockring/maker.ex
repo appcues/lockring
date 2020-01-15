@@ -73,7 +73,7 @@ defmodule Lockring.Maker do
         start: {Lockring.WaitQueue, :start_link, [wait_queue_opts]},
         restart: :permanent,
         type: :worker,
-        shutdown: :brutal_kill
+        shutdown: :brutal_kill,
       })
 
     pid
