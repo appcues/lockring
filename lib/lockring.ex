@@ -129,7 +129,7 @@ defmodule Lockring do
       nil ->
         new(name, opts)
         spin()
-        lock(name, opts)
+        lock_with_index(name, opts)
 
       locks ->
         index = next_index(name)

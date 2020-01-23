@@ -39,7 +39,7 @@ defmodule Lockring.WaitQueue do
       name: args[:name],
       index: args[:index],
       flags: args[:flags],
-      waiting: [],
+      deque: Deque.new(size),
       wait_count: 0,
     }
 
@@ -51,20 +51,25 @@ defmodule Lockring.WaitQueue do
     if state.wait_count >= state.size do
       {:reply, :fail, state}
     else
-      waiting = [{pid, timeout_at} | state.waiting]
+      deque = Deque.append(state.deque, {pid, timeout_at})
       wait_count = state.wait_count + 1
       :atomics.put(state.flags, state.index, 1)
 
       {:reply, :ok,
-       %{state | waiting: waiting, wait_count: state.wait_count + 1}}
+       %{state | deque: deque, wait_count: state.wait_count + 1}}
     end
   end
 
   @impl true
   def handle_cast({:next, lock_ref, resource}, state) do
-    case state.waiting do
-      [{pid, timeout_at} | rest] ->
-        new_state = %{state | waiting: rest, wait_count: state.wait_count - 1}
+    case Deque.pop(state.deque) do
+      {nil, _deque} ->
+        :atomics.put(state.flags, state.index, 0)
+        Lockring.release(lock_ref)
+        {:noreply, state}
+
+      {{pid, timeout_at}, deque} ->
+        new_state = %{state | deque: deque, wait_count: state.wait_count - 1}
 
         if timeout_at == :infinity || timeout_at <= now() do
           send(pid, {Lockring.GoAhead, lock_ref, resource})
@@ -72,11 +77,6 @@ defmodule Lockring.WaitQueue do
         else
           handle_cast({:next, lock_ref, resource}, new_state)
         end
-
-      [] ->
-        :atomics.put(state.flags, state.index, 0)
-        Lockring.release(lock_ref)
-        {:noreply, state}
     end
   end
 

@@ -172,4 +172,8 @@ defmodule LockringTest do
     assert :ok = Lockring.release(lock_ref)
     assert :fail = Lockring.lock(name)
   end
+
+  test "wait queue can be saturated" do
+    
+  end
 end

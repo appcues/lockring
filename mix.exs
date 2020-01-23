@@ -22,6 +22,7 @@ defmodule Lockring.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:deque, "~> 1.2"},
       {:ex_doc, "~> 0.16", only: :dev, runtime: false},
       {:dialyxir, "~> 1.0.0-rc", only: [:dev, :test], runtime: false},
       {:freedom_formatter, "~> 1.0", only: :dev, runtime: false},
