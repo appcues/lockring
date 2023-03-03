@@ -25,7 +25,7 @@ defmodule Lockring.MixProject do
       {:ex_doc, "~> 0.16", only: :dev, runtime: false},
       {:dialyxir, "~> 0.5", only: [:dev, :test], runtime: false},
       {:freedom_formatter, "~> 1.0", only: :dev, runtime: false},
-      {:excoveralls, "~> 0.11", only: :test}
+      {:excoveralls, "~> 0.16", only: :test}
     ]
   end
 end
